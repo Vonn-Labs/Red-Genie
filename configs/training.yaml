@@ -1,0 +1,47 @@
+# wandb
+use_wandb: true
+wandb_project: tinyworlds
+
+# dataset
+dataset: POKEMON
+preload_ratio: 0.005 # Adjust if you run out of RAM. 0.005 is safe for 16GB RAM.
+
+# shared model params
+patch_size: 4
+context_length: 16     # Updated to 16 to match Genie paper
+frame_size: 128        # Updated to 128 to match your generated data
+latent_dim: 8          # Slightly increased for better reconstruction of pixel art
+num_bins: 4 
+n_actions: 8           # Updated to 8 (Power of 2, covers your ~7 buttons)
+
+# performance
+amp: true              # Mixed precision is supported on M2
+tf32: false            # DISABLED: NVIDIA specific feature, not for Mac
+compile: false         # DISABLED: Torch.compile is unstable on Mac MPS
+
+# distributed launch (torchrun)
+distributed: 
+  use_ddp: False
+  use_fsdp: False
+  reshard_after_forward: False
+nproc_per_node: 1 
+standalone: true 
+
+# stage configs
+video_tokenizer_config: configs/video_tokenizer.yaml
+latent_actions_config: configs/latent_actions.yaml
+dynamics_config: configs/dynamics.yaml
+
+# which stages to run
+# You can set these to False individually if you want to train stage-by-stage
+run_video_tokenizer: true
+run_latent_actions: true
+run_dynamics: true
+
+# --- DATASET REGISTRY ---
+datasets:
+  POKEMON:
+    path: "pokemon.h5"    # Ensure this file is in the root tinyworlds folder
+    image_size: 128
+    sequence_length: 16
+    channels: 3

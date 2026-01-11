@@ -1,4 +1,6 @@
-dataset/
-rom.gb
-rom.gbc
-rom.gba
+*results*/
+*pycache*/
+data/
+batch_visualizations/*
+wandb/*
+setup.sh
