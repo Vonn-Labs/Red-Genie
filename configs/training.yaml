@@ -3,21 +3,25 @@ use_wandb: true
 wandb_project: tinyworlds
 
 # dataset
-dataset: POKEMON
-preload_ratio: 0.005 # Adjust if you run out of RAM. 0.005 is safe for 16GB RAM.
+dataset: POKEMON       # This tells the code to look for the 'POKEMON' if/else block we made in data_utils.py
+preload_ratio: 0.005   # Low ratio to save RAM on your Mac
 
 # shared model params
-patch_size: 4
-context_length: 16     # Updated to 16 to match Genie paper
-frame_size: 128        # Updated to 128 to match your generated data
-latent_dim: 8          # Slightly increased for better reconstruction of pixel art
-num_bins: 4 
-n_actions: 8           # Updated to 8 (Power of 2, covers your ~7 buttons)
+patch_size: 8
+context_length: 16     # Matches Genie paper
+frame_size: 128        # Matches your pokemon.h5
+latent_dim: 8
+num_bins: 4
+n_actions: 8           # Matches Game Boy inputs (Up, Down, Left, Right, A, B, Start, Select/Null)
 
-# performance
-amp: true              # Mixed precision is supported on M2
-tf32: false            # DISABLED: NVIDIA specific feature, not for Mac
-compile: false         # DISABLED: Torch.compile is unstable on Mac MPS
+# --- MEMORY OPTIMIZATION FOR M2 MAC ---
+batch_size_per_gpu: 1           # CRITICAL: Process 1 video at a time (was likely default 32)
+gradient_accumulation_steps: 8  # Accumulate 8 steps to simulate a batch of 8 (Stabilizes training)
+
+# performance (M2 Mac Optimized)
+amp: true
+tf32: false            # DISABLED: NVIDIA only
+compile: false         # DISABLED: Causes crashes on Mac MPS
 
 # distributed launch (torchrun)
 distributed: 
@@ -33,15 +37,8 @@ latent_actions_config: configs/latent_actions.yaml
 dynamics_config: configs/dynamics.yaml
 
 # which stages to run
-# You can set these to False individually if you want to train stage-by-stage
 run_video_tokenizer: true
 run_latent_actions: true
 run_dynamics: true
 
-# --- DATASET REGISTRY ---
-datasets:
-  POKEMON:
-    path: "pokemon.h5"    # Ensure this file is in the root tinyworlds folder
-    image_size: 128
-    sequence_length: 16
-    channels: 3
+# --- DO NOT ADD ANYTHING BELOW THIS LINE ---

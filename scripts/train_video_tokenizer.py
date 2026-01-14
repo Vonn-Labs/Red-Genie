@@ -19,6 +19,23 @@ def main():
     # vidtokenizer config merged with training_config.yaml (training takes priority), plus CLI overrides
     args: VideoTokenizerConfig = load_stage_config_merged(VideoTokenizerConfig, default_config_path=os.path.join(os.getcwd(), 'configs', 'video_tokenizer.yaml'))
 
+    # --- MAC M2 / MPS COMPATIBILITY FIX ---
+    if torch.backends.mps.is_available():
+        print("🍎 MAC M2 DETECTED: Switching to MPS (Metal Performance Shaders)")
+        args.device = "mps"
+        args.compile = False      # Torch.compile is unstable on MPS
+        args.tf32 = False         # TF32 is NVIDIA specific
+        args.use_fused_adam = False # Fused AdamW not supported on MPS
+    elif not torch.cuda.is_available():
+        print("⚠️ No GPU detected: Switching to CPU")
+        args.device = "cpu"
+        args.tf32 = False
+        args.use_fused_adam = False
+    else:
+        # Defaults for NVIDIA/CUDA
+        args.use_fused_adam = True 
+    # --------------------------------------
+
     # DDP setup
     dist_setup = init_distributed_from_env()
 
@@ -32,6 +49,7 @@ def main():
     if is_main:
         print(f"Video Tokenizer Training")
         print(f'Results will be saved in {stage_dir}')
+        print(f'Using Device: {args.device}')
 
     # dataloader
     data_overrides = {}
@@ -39,6 +57,7 @@ def main():
         data_overrides['fps'] = args.fps
     if hasattr(args, 'preload_ratio') and args.preload_ratio is not None:
         data_overrides['preload_ratio'] = args.preload_ratio
+        
     training_data, validation_data, training_loader, validation_loader, x_train_var = load_data_and_data_loaders(
         dataset=args.dataset, 
         batch_size=args.batch_size_per_gpu, 
@@ -48,8 +67,7 @@ def main():
         world_size=dist_setup['world_size'],
         **data_overrides,
     )
-    # print("Length of training data:", len(training_data))
-    # print("Length of validation data:", len(validation_data))
+
     # init model and optional ckpt load
     model = VideoTokenizer(
         frame_size=(args.frame_size, args.frame_size), 
@@ -61,6 +79,7 @@ def main():
         latent_dim=args.latent_dim,
         num_bins=args.num_bins,
     ).to(args.device)
+    
     if args.checkpoint:
         model, _ = load_videotokenizer_from_checkpoint(
             args.checkpoint, 
@@ -71,15 +90,19 @@ def main():
 
     # optional DDP, compile, param count, tf32
     print_param_count_if_main(model, "VideoTokenizer", is_main)
+    
     if args.compile:
+        print("Compiling model...")
         model = torch.compile(model, mode="reduce-overhead", fullgraph=False, dynamic=True)
+        
     model = prepare_model_for_distributed(
         model, 
         args.distributed, 
         model_type=model.model_type, 
         device_mesh=dist_setup['device_mesh'],
     )
-    if args.tf32:
+    
+    if args.tf32 and args.device == 'cuda':
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
 
@@ -93,15 +116,24 @@ def main():
             else:
                 decay.append(param)
 
-    # fused AdamW
+    # fused AdamW (Conditional based on device)
+    # MPS does not support fused=True in most PyTorch versions
+    use_fused = getattr(args, 'use_fused_adam', False)
+    
     optimizer = optim.AdamW([
         {'params': decay, 'weight_decay': 0.01},
         {'params': no_decay, 'weight_decay': 0}
-    ], lr=args.learning_rate, betas=(0.9, 0.999), eps=1e-8, fused=True)
+    ], lr=args.learning_rate, betas=(0.9, 0.999), eps=1e-8, fused=use_fused)
     
     # cosine scheduler for lr warmup
     scheduler = create_cosine_scheduler(optimizer, args.n_updates)
-    train_ctx = torch.amp.autocast(args.device, enabled=True, dtype=torch.bfloat16) if args.amp and not args.distributed.use_fsdp else nullcontext()
+    
+    # AutoCast logic (Compatible with MPS which supports bfloat16)
+    if args.amp and not args.distributed.use_fsdp:
+        # MPS supports autocast in recent PyTorch versions
+        train_ctx = torch.amp.autocast(args.device, enabled=True, dtype=torch.bfloat16)
+    else:
+        train_ctx = nullcontext()
 
     results = {
         'n_updates': 0,
@@ -122,8 +154,11 @@ def main():
         optimizer.zero_grad(set_to_none=True)
         if isinstance(model, FSDPModule):
             model.set_requires_gradient_sync(False)
-        if args.compile:
+            
+        # FIX: Only call cudagraphs if we are actually compiled AND on CUDA
+        if args.compile and args.device == 'cuda':
             torch.compiler.cudagraph_mark_step_begin()
+            
         for micro_batch in range(args.gradient_accumulation_steps):
             try:
                 (x, _) = next(train_iter)

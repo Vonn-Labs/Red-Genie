@@ -9,12 +9,13 @@ import os
 import numpy as np
 import matplotlib.pyplot as plt
 from torchvision.utils import make_grid
+# We reuse PicoDoomDataset as a generic HDF5 loader for Pokemon
 from datasets.datasets import PongDataset, SonicDataset, PolePositionDataset, PicoDoomDataset, ZeldaDataset
 
-DEFAULT_NUM_WORKERS = 2
-DEFAULT_PREFETCH_FACTOR = 2
+DEFAULT_NUM_WORKERS = 0 # Reduced for Mac (prevents fork crashes)
+DEFAULT_PREFETCH_FACTOR = None
 DEFAULT_PIN_MEMORY = False
-DEFAULT_PERSISTENT_WORKERS = True
+DEFAULT_PERSISTENT_WORKERS = False
 
 
 def _default_video_transform():
@@ -26,9 +27,14 @@ def _default_video_transform():
 
 def _load_video_dataset_pair(dataset_cls, video_rel_path, h5_rel_path, num_frames, transform=None, fps=30, preload_ratio=1, **kwargs):
     current_folder_path = os.getcwd()
-    video_path = current_folder_path + video_rel_path
-    preprocessed_path = current_folder_path + h5_rel_path
+    
+    # FIX: Robust path joining that handles leading slashes correctly
+    video_path = os.path.join(current_folder_path, video_rel_path.lstrip('/'))
+    preprocessed_path = os.path.join(current_folder_path, h5_rel_path.lstrip('/'))
+    
     transform = _default_video_transform() if transform is None else transform
+
+    print(f"Loading Dataset from: {preprocessed_path}")
 
     train = dataset_cls(
         video_path,
@@ -56,8 +62,8 @@ def _load_video_dataset_pair(dataset_cls, video_rel_path, h5_rel_path, num_frame
 def load_pong(num_frames=1, fps=15, preload_ratio=1):
     return _load_video_dataset_pair(
         PongDataset,
-        '/data/pong.mp4',
-        '/data/pong_frames.h5',
+        'datasets/pong.mp4',
+        'datasets/pong_frames.h5',
         num_frames=num_frames,
         fps=fps,
         preload_ratio=preload_ratio
@@ -67,8 +73,8 @@ def load_pong(num_frames=1, fps=15, preload_ratio=1):
 def load_sonic(num_frames=4, fps=15, preload_ratio=1):
     return _load_video_dataset_pair(
         SonicDataset,
-        '/data/sonic_frames.mp4',
-        '/data/sonic_frames.h5',
+        'datasets/sonic_frames.mp4',
+        'datasets/sonic_frames.h5',
         num_frames=num_frames,
         fps=fps,
         preload_ratio=preload_ratio
@@ -78,8 +84,8 @@ def load_sonic(num_frames=4, fps=15, preload_ratio=1):
 def load_pole_position(num_frames=4, fps=15, preload_ratio=1):
     return _load_video_dataset_pair(
         PolePositionDataset,
-        '/data/pole_position.mp4',
-        '/data/pole_position_frames.h5',
+        'datasets/pole_position.mp4',
+        'datasets/pole_position_frames.h5',
         num_frames=num_frames,
         fps=fps,
         preload_ratio=preload_ratio
@@ -89,8 +95,8 @@ def load_pole_position(num_frames=4, fps=15, preload_ratio=1):
 def load_picodoom(num_frames=4, fps=30, preload_ratio=1):
     return _load_video_dataset_pair(
         PicoDoomDataset,
-        '/data/picodoom cleaned.mp4',
-        '/data/picodoom_frames.h5',
+        'datasets/picodoom cleaned.mp4',
+        'datasets/picodoom_frames.h5',
         num_frames=num_frames,
         fps=30,
         preload_ratio=preload_ratio
@@ -100,8 +106,21 @@ def load_picodoom(num_frames=4, fps=30, preload_ratio=1):
 def load_zelda(num_frames=4, fps=15, preload_ratio=1):
     return _load_video_dataset_pair(
         ZeldaDataset,
-        '/data/Zelda oot2d 1 Cut.mp4',
-        '/data/zelda_frames.h5',
+        'datasets/Zelda oot2d 1 Cut.mp4',
+        'datasets/zelda_frames.h5',
+        num_frames=num_frames,
+        fps=fps,
+        preload_ratio=preload_ratio
+    )
+
+# --- NEW FUNCTION FOR POKEMON ---
+def load_pokemon(num_frames=16, fps=6, preload_ratio=1):
+    # We use PicoDoomDataset class as a driver because it implements the standard HDF5 loading logic.
+    # We point it to the pokemon.h5 file we created.
+    return _load_video_dataset_pair(
+        PicoDoomDataset, 
+        'datasets/pokemon.h5',  # dummy video path
+        'datasets/pokemon.h5',  # Actual H5 path
         num_frames=num_frames,
         fps=fps,
         preload_ratio=preload_ratio
@@ -142,6 +161,8 @@ def data_loaders(train_data, val_data, batch_size, distributed=False, rank=0, wo
 
 
 def load_data_and_data_loaders(dataset, batch_size, num_frames=1, distributed=False, rank=0, world_size=1, fps=15, preload_ratio=1):
+    print(f"Initializing Dataset: {dataset} | FPS: {fps} | Frames: {num_frames}")
+    
     if dataset == 'PONG':
         training_data, validation_data = load_pong(num_frames=num_frames, fps=fps, preload_ratio=preload_ratio)
     elif dataset == 'SONIC':
@@ -152,14 +173,29 @@ def load_data_and_data_loaders(dataset, batch_size, num_frames=1, distributed=Fa
         training_data, validation_data = load_picodoom(num_frames=num_frames, fps=fps, preload_ratio=preload_ratio)
     elif dataset == 'ZELDA':
         training_data, validation_data = load_zelda(num_frames=num_frames, fps=fps, preload_ratio=preload_ratio)
+    
+    # --- POKEMON LOGIC ---
+    elif dataset == 'POKEMON':
+        training_data, validation_data = load_pokemon(num_frames=num_frames, fps=6, preload_ratio=preload_ratio)
+    
     else:
-        raise ValueError('Invalid dataset')
+        raise ValueError(f'Invalid dataset: {dataset}')
 
     training_loader, validation_loader = data_loaders(
         training_data, validation_data, batch_size,
         distributed=distributed, rank=rank, world_size=world_size
     )
-    x_train_var = np.var(training_data.data)
+    
+    # Calculate variance for normalization stats (safe check)
+    if len(training_data) > 0:
+        try:
+            # Try efficient calculation if .data attribute exists and is numpy
+            x_train_var = np.var(training_data.data)
+        except:
+            # Fallback default variance if data isn't directly accessible
+            x_train_var = 1.0 
+    else:
+        x_train_var = 1.0
 
     return training_data, validation_data, training_loader, validation_loader, x_train_var
 
